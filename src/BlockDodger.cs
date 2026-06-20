@@ -27,15 +27,25 @@ public class BlockDodger : MonoBehaviour
     public const float BlockSize = 1.2f;        // ブロック/自機の一辺
     public const float HitShrink = 0.2f;        // 当たり判定をやや甘くする余白
 
+    // ニアミス（際どい回避）判定の帯。当たり判定の外〜この距離を「すれすれ」とみなしボーナス。
+    public const float NearBand = 2.1f;         // 中心間距離がこの内側＝ニアミス候補
+    public const int NearBonus = 5;             // ニアミス1回のボーナス点
+
     Transform player;
     float spawnTimer;
     readonly List<Transform> blocks = new List<Transform>();
+    // すでにニアミス加点したブロックを記録（多重加点を防ぐ）。
+    readonly HashSet<Transform> nearScored = new HashSet<Transform>();
 
     bool gameOver;
 
-    // スコア = 生存時間（秒）。ハイスコアはセッション中だけ保持する。
+    // スコア = 生存時間（秒）＋ ニアミスボーナス。ハイスコアはセッション中だけ保持する。
     float surviveTime;
     float bestTime;
+    int nearMisses;     // 際どい回避の回数（ミクロ報酬）
+    int bonusScore;     // ニアミスで稼いだ加点
+    float Score => surviveTime + bonusScore;       // 総合スコア
+    float bestScore;
     TextMesh scoreLabel; // ワールド空間のHUD（カメラ描画＝スクショに写る）
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
@@ -119,7 +129,7 @@ public class BlockDodger : MonoBehaviour
     void UpdateScoreLabel()
     {
         if (scoreLabel != null)
-            scoreLabel.text = string.Format("TIME {0:0.0}s\nBEST {1:0.0}s\nLV {2}", surviveTime, bestTime, 1 + Mathf.FloorToInt(Difficulty * 9f));
+            scoreLabel.text = string.Format("SCORE {0:0}\nBEST {1:0}\nNEAR {2}   LV {3}", Score, bestScore, nearMisses, 1 + Mathf.FloorToInt(Difficulty * 9f));
     }
 
     void Update()
@@ -162,9 +172,11 @@ public class BlockDodger : MonoBehaviour
             if (Mathf.Abs(pp.x - bp.x) < reach && Mathf.Abs(pp.y - bp.y) < reach)
             {
                 gameOver = true;
-                if (surviveTime > bestTime) bestTime = surviveTime; // ベスト更新
+                if (Score > bestScore) bestScore = Score; // ベスト更新
                 UpdateScoreLabel();
                 Paint(player.gameObject, new Color(0.5f, 0.5f, 0.55f)); // 被弾で灰色に
+                Juice.Lose();              // 低音＋強めの画面シェイク
+                Juice.Pop(pp, new Color(1f, 0.4f, 0.3f), 16); // 被弾の赤い飛散
                 break;
             }
         }
@@ -178,8 +190,11 @@ public class BlockDodger : MonoBehaviour
             if (blocks[i] != null) Destroy(blocks[i].gameObject);
         }
         blocks.Clear();
+        nearScored.Clear();
         spawnTimer = 0f;
         surviveTime = 0f;
+        nearMisses = 0;
+        bonusScore = 0;
         gameOver = false;
         player.position = new Vector3(0f, PlayerY, 0f);
         Paint(player.gameObject, new Color(0.30f, 0.65f, 1f));
@@ -201,7 +216,7 @@ public class BlockDodger : MonoBehaviour
         };
         center.normal.textColor = Color.white;
         var rect = new Rect(0f, Screen.height * 0.5f - 60f, Screen.width, 120f);
-        GUI.Label(rect, string.Format("GAME OVER\nScore {0:0.0}s   Best {1:0.0}s\nPress R to Restart", surviveTime, bestTime), center);
+        GUI.Label(rect, string.Format("GAME OVER\nScore {0:0}  Best {1:0}  Near {2}\nPress R to Restart", Score, bestScore, nearMisses), center);
     }
 
     // 一定間隔でブロックを生成し、毎フレーム落下させ、画面下で破棄する。
@@ -224,8 +239,26 @@ public class BlockDodger : MonoBehaviour
             b.position = p;
             // 落下中はゆっくり自転させて単調さを和らげる（見た目の調整）。
             b.Rotate(0f, 0f, 90f * Time.deltaTime, Space.Self);
+
+            // ニアミス（際どい回避）＝ミクロ報酬。プレイヤーの高さを当たらずに通過し、
+            // かつ横の中心間距離が「当たり判定の外〜NearBand」に収まったら 1回だけ加点。
+            if (!gameOver && !nearScored.Contains(b) && p.y <= PlayerY)
+            {
+                float dx = Mathf.Abs(p.x - player.position.x);
+                float reach = BlockSize - HitShrink;
+                if (dx >= reach && dx < NearBand)
+                {
+                    nearScored.Add(b);
+                    nearMisses++;
+                    bonusScore += NearBonus;
+                    Juice.Score(p);                 // 効果音＋黄色パーティクルが弾ける
+                    UpdateScoreLabel();
+                }
+            }
+
             if (p.y < DespawnY)
             {
+                nearScored.Remove(b);
                 Destroy(b.gameObject);
                 blocks.RemoveAt(i);
             }
